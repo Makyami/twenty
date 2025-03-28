@@ -8,6 +8,7 @@ import { useGetRecordFromCache } from '@/object-record/cache/hooks/useGetRecordF
 import { getObjectTypename } from '@/object-record/cache/utils/getObjectTypename';
 import { getRecordNodeFromRecord } from '@/object-record/cache/utils/getRecordNodeFromRecord';
 import { updateRecordFromCache } from '@/object-record/cache/utils/updateRecordFromCache';
+import { RecordGqlNode } from '@/object-record/graphql/types/RecordGqlNode';
 import { computeDepthOneRecordGqlFieldsFromRecord } from '@/object-record/graphql/utils/computeDepthOneRecordGqlFieldsFromRecord';
 import { generateDepthOneRecordGqlFields } from '@/object-record/graphql/utils/generateDepthOneRecordGqlFields';
 import { useRefetchAggregateQueries } from '@/object-record/hooks/useRefetchAggregateQueries';
@@ -18,8 +19,8 @@ import { getUpdateOneRecordMutationResponseField } from '@/object-record/utils/g
 import { sanitizeRecordInput } from '@/object-record/utils/sanitizeRecordInput';
 import { isNull } from '@sniptt/guards';
 import { useRecoilValue } from 'recoil';
-import { buildRecordFromKeysWithSameValue } from '~/utils/array/buildRecordFromKeysWithSameValue';
 import { isDefined } from 'twenty-shared/utils';
+import { buildRecordFromKeysWithSameValue } from '~/utils/array/buildRecordFromKeysWithSameValue';
 
 type useUpdateOneRecordProps = {
   objectNameSingular: string;
@@ -136,73 +137,113 @@ export const useUpdateOneRecord = <
         recordInput: updateOneRecordInput,
       }),
     };
-    const updatedRecord = await apolloClient
-      .mutate({
-        mutation: updateOneRecordMutation,
-        variables: {
-          idToUpdate,
-          input: sanitizedInput,
-        },
-        update: (cache, { data }) => {
-          const record = data?.[mutationResponseField];
-          if (!isDefined(record)) return;
 
-          triggerUpdateRecordOptimisticEffect({
-            cache,
-            objectMetadataItem,
-            currentRecord: computedOptimisticRecord,
-            updatedRecord: record,
-            objectMetadataItems,
-          });
-        },
-      })
-      .catch((error: Error) => {
-        if (!shouldHandleOptimisticCache) {
-          throw error;
+    const compareCachedWithOptimistic = (
+      cached: RecordGqlNode | null,
+      optimistic: RecordGqlNode | null,
+      signature: string,
+    ): boolean => {
+      if (cached == null && optimistic != null) {
+        return true;
+      } else if (cached != null && optimistic != null) {
+        return compareAux(cached[signature], optimistic[signature]);
+      }
+      return false;
+    };
+
+    const compareAux = (cached: any, optimistic: any): boolean => {
+      if (!(cached instanceof Object) && !(optimistic instanceof Object)) {
+        return cached !== optimistic;
+      }
+      for (const key in cached) {
+        if (
+          cached[key] instanceof Object &&
+          optimistic[key] instanceof Object
+        ) {
+          return compareAux(cached[key], optimistic[key]);
         }
-        const cachedRecordKeys = new Set(Object.keys(cachedRecord));
-        const recordKeysAddedByOptimisticCache = Object.keys(
-          optimisticRecordInput,
-        ).filter((diffKey) => !cachedRecordKeys.has(diffKey));
+        if (cached[key] !== optimistic[key]) {
+          return true;
+        }
+      }
+      return false;
+    };
+    if (
+      compareCachedWithOptimistic(
+        cachedRecordWithConnection,
+        optimisticRecordWithConnection,
+        Object.keys(optimisticRecordInput)[0],
+      )
+    ) {
+      const updatedRecord = await apolloClient
+        .mutate({
+          mutation: updateOneRecordMutation,
+          variables: {
+            idToUpdate,
+            input: sanitizedInput,
+          },
+          update: (cache, { data }) => {
+            const record = data?.[mutationResponseField];
+            if (!isDefined(record)) return;
 
-        const recordGqlFields = {
-          ...computeDepthOneRecordGqlFieldsFromRecord({
-            objectMetadataItem,
-            record: cachedRecord,
-          }),
-          ...buildRecordFromKeysWithSameValue(
-            recordKeysAddedByOptimisticCache,
-            true,
-          ),
-        };
+            triggerUpdateRecordOptimisticEffect({
+              cache,
+              objectMetadataItem,
+              currentRecord: computedOptimisticRecord,
+              updatedRecord: record,
+              objectMetadataItems,
+            });
+          },
+        })
+        .catch((error: Error) => {
+          if (!shouldHandleOptimisticCache) {
+            throw error;
+          }
+          const cachedRecordKeys = new Set(Object.keys(cachedRecord));
+          const recordKeysAddedByOptimisticCache = Object.keys(
+            optimisticRecordInput,
+          ).filter((diffKey) => !cachedRecordKeys.has(diffKey));
 
-        updateRecordFromCache({
-          objectMetadataItems,
-          objectMetadataItem,
-          cache: apolloClient.cache,
-          record: {
-            ...cachedRecord,
+          const recordGqlFields = {
+            ...computeDepthOneRecordGqlFieldsFromRecord({
+              objectMetadataItem,
+              record: cachedRecord,
+            }),
             ...buildRecordFromKeysWithSameValue(
               recordKeysAddedByOptimisticCache,
-              null,
+              true,
             ),
-          },
-          recordGqlFields,
+          };
+
+          updateRecordFromCache({
+            objectMetadataItems,
+            objectMetadataItem,
+            cache: apolloClient.cache,
+            record: {
+              ...cachedRecord,
+              ...buildRecordFromKeysWithSameValue(
+                recordKeysAddedByOptimisticCache,
+                null,
+              ),
+            },
+            recordGqlFields,
+          });
+
+          triggerUpdateRecordOptimisticEffect({
+            cache: apolloClient.cache,
+            objectMetadataItem,
+            currentRecord: optimisticRecordWithConnection,
+            updatedRecord: cachedRecordWithConnection,
+            objectMetadataItems,
+          });
+
+          throw error;
         });
 
-        triggerUpdateRecordOptimisticEffect({
-          cache: apolloClient.cache,
-          objectMetadataItem,
-          currentRecord: optimisticRecordWithConnection,
-          updatedRecord: cachedRecordWithConnection,
-          objectMetadataItems,
-        });
-
-        throw error;
-      });
-
-    await refetchAggregateQueries();
-    return updatedRecord?.data?.[mutationResponseField] ?? null;
+      await refetchAggregateQueries();
+      return updatedRecord?.data?.[mutationResponseField] ?? null;
+    }
+    return null;
   };
 
   return {
